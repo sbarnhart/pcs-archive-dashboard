@@ -1,5 +1,5 @@
 ﻿/*********************************************************************
- * PCS.gs — PCS API SYNC MODULE — v2.6
+ * PCS.gs — PCS API SYNC MODULE — v2.7
  * (add as 2nd file in the same project; pairs with main file v2.6)
  * Source of truth: pulls next-30-days party bookings hourly from the
  * PCS API (READ-ONLY). No Gmail access is used.
@@ -14,6 +14,7 @@
  *  v2.4 — pairs with clearly labeled disabled legacy entry points
  *  v2.5 — pairs with automatic Dashboard creation and target-sheet diagnostics
  *  v2.6 — accelerated history bootstrap and party-local date/time mapping
+ *  v2.7 — treats zone-less PCS event timestamps as UTC before Pacific conversion
  *
  * REQUIRES from the main file: tab_(), runLog_(), mgmtEmail_(), TABS,
  *   HEADERS, upsertEvent_(), validate_(), upsells_(). Keep both files
@@ -28,7 +29,7 @@
 
 
 const PCS = {
-  VERSION: '2.6',
+  VERSION: '2.7',
   BASE: 'https://api.partycs.com',
   TYPE_PARTY: [1, 3],        // 1=Event/In-House Party, 3=Online Party
   STATUS: { OPEN: 1, CANCELLED: 2, CLOSED: 3, QUOTE: 4, PENDING: 5 },
@@ -279,9 +280,10 @@ function pcsOrderToRec_(oid, summary) {
     phone: String(phone || ''),
     email: str_(cust, ['email', 'Email', 'emailAddress', 'EmailAddress']) || str_(src, ['email', 'Email']),
     address: addrParts.join(', '),
-    partyDate: fmtDate_(pd || eventStart),
-    partyTime: startT ? fmtTime_(startT) + (endT ? ' - ' + fmtTime_(endT) : '')
-      : (eventStart ? fmtTime_(eventStart) + (eventEnd ? ' - ' + fmtTime_(eventEnd) : '') : ''),
+    partyDate: eventStart ? fmtPcsDateTimeDate_(eventStart) : fmtDate_(pd),
+    partyTime: eventStart ? fmtPcsDateTimeTime_(eventStart) +
+      (eventEnd ? ' - ' + fmtPcsDateTimeTime_(eventEnd) : '')
+      : (startT ? fmtTime_(startT) + (endT ? ' - ' + fmtTime_(endT) : '') : ''),
     guestCount: String(num_(party, ['guestCount', 'GuestCount', 'guests', 'Guests'])
       || num_(src, ['guestCount', 'GuestCount']) || ''),
     balanceDue: money_(num_(src, ['balanceDue', 'BalanceDue', 'balance', 'Balance'])),
@@ -369,6 +371,20 @@ function pcsItems_(resp) {
 function str_(o, keys) { for (const k of keys) if (o && o[k] != null && o[k] !== '') return String(o[k]); return ''; }
 function num_(o, keys) { for (const k of keys) if (o && o[k] != null && o[k] !== '') return Number(o[k]); return null; }
 function money_(n) { return n == null ? '' : '$' + Number(n).toFixed(2); }
+function parsePcsDateTime_(s) {
+  let raw = String(s || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw) && !/(Z|[+-]\d{2}:?\d{2})$/i.test(raw)) raw += 'Z';
+  const d = new Date(raw);
+  return isNaN(d) ? null : d;
+}
+function fmtPcsDateTimeDate_(s) {
+  const d = parsePcsDateTime_(s);
+  return d ? Utilities.formatDate(d, CFG.TZ, 'EEE, MMM d, yyyy') : String(s);
+}
+function fmtPcsDateTimeTime_(s) {
+  const d = parsePcsDateTime_(s);
+  return d ? Utilities.formatDate(d, CFG.TZ, 'h:mm a') : String(s);
+}
 function fmtDate_(s) { const d = parseDate_(s); return d ? Utilities.formatDate(d, CFG.TZ, 'EEE, MMM d, yyyy') : String(s); }
 function fmtTime_(s) {
   if (/[AP]M/i.test(s)) return String(s).trim();
