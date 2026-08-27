@@ -6,7 +6,7 @@ const root = process.cwd();
 const exportsDir = path.join(root, "exports");
 const outputDir = path.join(root, "dashboard-output");
 const outputPath = path.join(outputDir, "PCS Archive Dashboard.xlsx");
-const archiveVersion = "1.3";
+const archiveVersion = "1.4";
 
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
