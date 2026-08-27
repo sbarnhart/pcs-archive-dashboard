@@ -16,6 +16,22 @@ def _stamp(day: date, *, end: bool = False) -> str:
     return value.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _local_stamp(day: date, *, end: bool = False) -> str:
+    """Format a facility-local report timestamp without a UTC offset.
+
+    PCS closeout/detail explicitly treats these values as facility-local and
+    performs no timezone conversion.
+    """
+    value = datetime.combine(day, time.max if end else time.min)
+    return value.isoformat(timespec="milliseconds")
+
+
+def _missing_or_null(path: Path) -> bool:
+    if not path.exists():
+        return True
+    return path.read_text(encoding="utf-8").strip() in {"", "null"}
+
+
 def _windows(start: date, end: date, days: int = 2):
     cursor = start
     while cursor <= end:
@@ -80,9 +96,12 @@ def export_facility(client: PCSClient, out: Path, page_size: int, start: date, e
             report_path = out / "reports" / f"bookings_{name}" / f"{window_key}.json"
             if not report_path.exists():
                 write_json(report_path, client.get(f"/reports/bookings/{name}", booking_dates))
-        report_dates = {"startDateTime": _stamp(window_start), "endDateTime": _stamp(window_end, end=True)}
+        report_dates = {
+            "startDateTime": _local_stamp(window_start),
+            "endDateTime": _local_stamp(window_end, end=True),
+        }
         closeout_path = out / "reports" / "closeout_detail" / f"{window_key}.json"
-        if not closeout_path.exists():
+        if _missing_or_null(closeout_path):
             write_json(
                 closeout_path,
                 client.report("/reports/closeout/detail", {**report_dates, "includeNonTerminals": True}),
