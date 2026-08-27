@@ -6,7 +6,7 @@ const root = process.cwd();
 const exportsDir = path.join(root, "exports");
 const outputDir = path.join(root, "dashboard-output");
 const outputPath = path.join(outputDir, "PCS Archive Dashboard.xlsx");
-const archiveVersion = "1.4";
+const archiveVersion = "1.5";
 
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
@@ -79,13 +79,14 @@ for (const run of runs) {
     const rawDate = order.orderDate ?? order.eventStartDateTime ?? order.createdUtc;
     if (!rawDate) continue;
     const month = String(rawDate).slice(0, 7);
-    const row = monthly.get(month) ?? { month, orders: 0, orderValue: 0, payments: 0, refunds: 0, paidRevenue: 0, pcsRevenue: null, balance: 0, cancelled: 0, closed: 0 };
+    const row = monthly.get(month) ?? { month, orders: 0, calculatedRevenue: 0, orderValue: 0, payments: 0, refunds: 0, paidRevenue: 0, pcsRevenue: null, balance: 0, cancelled: 0, closed: 0 };
     row.orders += 1;
     row.orderValue += Number(order.orderTotal ?? 0);
     row.payments += Number(order.totalPayments ?? 0);
     row.refunds += Number(order.totalRefunds ?? 0);
     row.paidRevenue += Number(order.totalPayments ?? 0) - Number(order.totalRefunds ?? 0);
     row.balance += Number(order.balanceDue ?? 0);
+    if (!order.cancelDate) row.calculatedRevenue += Math.max(0, Number(order.orderTotal ?? 0) - Number(order.balanceDue ?? 0));
     if (order.cancelDate) row.cancelled += 1;
     if (order.dateClosed) row.closed += 1;
     monthly.set(month, row);
@@ -95,7 +96,7 @@ const revenueReportFile = path.join(exportsDir, "reporting", "revenue-by-month.j
 if (await exists(revenueReportFile)) {
   const revenueReport = await readJson(revenueReportFile);
   for (const item of revenueReport.months ?? []) {
-    const row = monthly.get(item.month) ?? { month: item.month, orders: null, orderValue: null, payments: null, refunds: null, paidRevenue: null, pcsRevenue: null, balance: null, cancelled: null, closed: null };
+    const row = monthly.get(item.month) ?? { month: item.month, orders: null, calculatedRevenue: null, orderValue: null, payments: null, refunds: null, paidRevenue: null, pcsRevenue: null, balance: null, cancelled: null, closed: null };
     row.pcsRevenue = Number(item.revenue ?? 0);
     monthly.set(item.month, row);
   }
@@ -124,12 +125,12 @@ const titleFormat = { font: { bold: true, size: 18, color: "#111827" } };
 const thinGrid = { borders: { preset: "all", style: "thin", color: "#E5E7EB" } };
 
 dashboard.showGridLines = false;
-dashboard.getRange("A1:H1").merge();
+dashboard.getRange("A1:K1").merge();
 dashboard.getRange("A1").values = [[`PCS ARCHIVE — v${archiveVersion}`]];
-dashboard.getRange("A1:H1").format = titleFormat;
-dashboard.getRange("A2:H3").merge();
+dashboard.getRange("A1:K1").format = titleFormat;
+dashboard.getRange("A2:K3").merge();
 dashboard.getRange("A2").values = [["ARCHIVE COVERAGE — includes May–December 2013 and the completed 2026 year-to-date export through August 25. Calendar-year coverage remains partial; totals below are archived-data totals, not complete lifetime business totals."]];
-dashboard.getRange("A2:H3").format = { fill: "#FEF3C7", font: { color: "#92400E", bold: true }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
+dashboard.getRange("A2:K3").format = { fill: "#FEF3C7", font: { color: "#92400E", bold: true }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
 
 dashboard.getRange("A5:B5").values = [["Archived orders", totalOrders]];
 dashboard.getRange("D5:E5").values = [["Open issues", allIssues.length]];
@@ -166,32 +167,41 @@ dashboard.getRange("D11:H11").format = headerFormat;
 dashboard.getRange("D11:H15").format.borders = thinGrid.borders;
 dashboard.getRange("D11:H15").format.wrapText = true;
 
-const chartData = monthlyRows.map((r) => [r.month, r.orders, r.pcsRevenue]);
-dashboard.getRange(`A17:C${17 + chartData.length}`).values = [["Month", "Orders", "PCS revenue"], ...chartData];
-dashboard.getRange("A17:C17").format = headerFormat;
+const chartData = monthlyRows.map((r) => [r.month, r.orders, r.calculatedRevenue, r.pcsRevenue]);
+dashboard.getRange(`A17:D${17 + chartData.length}`).values = [["Month", "Orders", "Calculated revenue*", "PCS revenue"], ...chartData];
+dashboard.getRange("E17:F17").values = [["Difference", "Variance %"]];
+dashboard.getRange("A17:F17").format = headerFormat;
 dashboard.getRange(`B18:B${17 + chartData.length}`).format.numberFormat = "#,##0";
-dashboard.getRange(`C18:C${17 + chartData.length}`).format.numberFormat = "$#,##0.00";
+dashboard.getRange(`C18:E${17 + chartData.length}`).format.numberFormat = "$#,##0.00";
+dashboard.getRange(`F18:F${17 + chartData.length}`).format.numberFormat = "0.0%";
+dashboard.getRange("E18").formulas = [["=IF(COUNT(C18:D18)<2,\"\",C18-D18)"]];
+dashboard.getRange(`E18:E${17 + chartData.length}`).fillDown();
+dashboard.getRange("F18").formulas = [["=IF(COUNT(C18:D18)<2,\"\",IFERROR((C18-D18)/D18,\"\"))"]];
+dashboard.getRange(`F18:F${17 + chartData.length}`).fillDown();
 const ordersChart = dashboard.charts.add("line", dashboard.getRange(`A17:B${17 + chartData.length}`));
 ordersChart.title = "Archived orders by month";
 ordersChart.hasLegend = false;
 ordersChart.xAxis = { axisType: "textAxis" };
 ordersChart.yAxis = { numberFormatCode: "#,##0" };
-ordersChart.setPosition("D17", "H32");
-const revenueChart = dashboard.charts.add("line", { chartType: "line", title: "PCS revenue by payment month", hasLegend: false });
-const revenueSeries = revenueChart.series.add("PCS revenue");
-revenueSeries.categoryFormula = `'Dashboard'!$A$18:$A$${17 + chartData.length}`;
-revenueSeries.formula = `'Dashboard'!$C$18:$C$${17 + chartData.length}`;
-revenueChart.title = "PCS revenue by payment month";
-revenueChart.hasLegend = false;
+ordersChart.setPosition("G17", "K32");
+const revenueChart = dashboard.charts.add("line", { chartType: "line", title: "Calculated revenue vs PCS", hasLegend: true });
+const calculatedSeries = revenueChart.series.add("Calculated revenue*");
+calculatedSeries.categoryFormula = `'Dashboard'!$A$18:$A$${17 + chartData.length}`;
+calculatedSeries.formula = `'Dashboard'!$C$18:$C$${17 + chartData.length}`;
+const pcsSeries = revenueChart.series.add("PCS revenue");
+pcsSeries.categoryFormula = `'Dashboard'!$A$18:$A$${17 + chartData.length}`;
+pcsSeries.formula = `'Dashboard'!$D$18:$D$${17 + chartData.length}`;
+revenueChart.title = "Calculated revenue vs PCS";
+revenueChart.hasLegend = true;
 revenueChart.xAxis = { axisType: "textAxis" };
 revenueChart.yAxis = { numberFormatCode: "$#,##0" };
-revenueChart.setPosition("D34", "H49");
+revenueChart.setPosition("G34", "K49");
 const dashboardNoteRow = 19 + chartData.length;
-dashboard.getRange(`A${dashboardNoteRow}:H${dashboardNoteRow + 1}`).merge();
-dashboard.getRange(`A${dashboardNoteRow}`).values = [["Revenue comes from the PCS Revenue By Month report and represents total payments taken by payment month through August 27, 2026. Order counts come from completed archive exports; blank order counts indicate years not yet collected."]];
-dashboard.getRange(`A${dashboardNoteRow}:H${dashboardNoteRow + 1}`).format = { fill: "#F3F4F6", wrapText: true, font: { italic: true, color: "#374151" } };
+dashboard.getRange(`A${dashboardNoteRow}:K${dashboardNoteRow + 1}`).merge();
+dashboard.getRange(`A${dashboardNoteRow}`).values = [["Calculated revenue is the non-cancelled archived order total less balance due, clamped at $0 per order. PCS revenue is retained beside it for validation. Before February 2019, calculated revenue is the historical estimate because PCS transaction data is unavailable."]];
+dashboard.getRange(`A${dashboardNoteRow}:K${dashboardNoteRow + 1}`).format = { fill: "#F3F4F6", wrapText: true, font: { italic: true, color: "#374151" } };
 dashboard.freezePanes.freezeRows(3);
-dashboard.getRange("A:H").format.columnWidth = 18;
+dashboard.getRange("A:K").format.columnWidth = 18;
 dashboard.getRange("A:A").format.columnWidth = 23;
 dashboard.getRange("D:D").format.columnWidth = 26;
 dashboard.getRange("F:F").format.columnWidth = 24;
@@ -220,14 +230,20 @@ coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("cont
 coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("containsText", { text: "Partial", format: { fill: "#FEF3C7", font: { color: "#92400E" } } });
 coverage.freezePanes.freezeRows(1);
 
-monthlySheet.getRange("A1:J1").values = [["Month", "Orders", "PCS revenue", "Archived net payments*", "Archived payments*", "Archived refunds*", "Order value*", "Balance due", "Cancelled", "Closed"]];
-monthlySheet.getRange(`A2:J${monthlyRows.length + 1}`).values = monthlyRows.map((r) => [r.month, r.orders, r.pcsRevenue, r.paidRevenue, r.payments, r.refunds, r.orderValue, r.balance, r.cancelled, r.closed]);
-monthlySheet.getRange("A1:J1").format = headerFormat;
-monthlySheet.getRange(`A1:J${monthlyRows.length + 1}`).format.borders = thinGrid.borders;
-monthlySheet.getRange(`C2:H${monthlyRows.length + 1}`).format.numberFormat = "$#,##0.00";
+monthlySheet.getRange("A1:M1").values = [["Month", "Orders", "Calculated revenue*", "PCS revenue", "Difference", "Variance %", "Archived net payments*", "Archived payments*", "Archived refunds*", "Order value*", "Balance due", "Cancelled", "Closed"]];
+monthlySheet.getRange(`A2:M${monthlyRows.length + 1}`).values = monthlyRows.map((r) => [r.month, r.orders, r.calculatedRevenue, r.pcsRevenue, null, null, r.paidRevenue, r.payments, r.refunds, r.orderValue, r.balance, r.cancelled, r.closed]);
+monthlySheet.getRange("E2").formulas = [["=IF(COUNT(C2:D2)<2,\"\",C2-D2)"]];
+monthlySheet.getRange(`E2:E${monthlyRows.length + 1}`).fillDown();
+monthlySheet.getRange("F2").formulas = [["=IF(COUNT(C2:D2)<2,\"\",IFERROR((C2-D2)/D2,\"\"))"]];
+monthlySheet.getRange(`F2:F${monthlyRows.length + 1}`).fillDown();
+monthlySheet.getRange("A1:M1").format = headerFormat;
+monthlySheet.getRange(`A1:M${monthlyRows.length + 1}`).format.borders = thinGrid.borders;
+monthlySheet.getRange(`C2:E${monthlyRows.length + 1}`).format.numberFormat = "$#,##0.00";
+monthlySheet.getRange(`F2:F${monthlyRows.length + 1}`).format.numberFormat = "0.0%";
+monthlySheet.getRange(`G2:K${monthlyRows.length + 1}`).format.numberFormat = "$#,##0.00";
 monthlySheet.getRange(`B2:B${monthlyRows.length + 1}`).format.numberFormat = "#,##0";
 monthlySheet.getRange("A:A").format.columnWidth = 14;
-monthlySheet.getRange("B:J").format.columnWidth = 19;
+monthlySheet.getRange("B:M").format.columnWidth = 19;
 monthlySheet.freezePanes.freezeRows(1);
 
 const issueHeaders = ["Issue ID", "Run", "Order #", "Priority", "Issue type", "Description", "Balance due", "Order total", "Payments", "Cancel date", "Status", "Assigned to", "Resolution notes", "Resolved at", "Verified run"];
@@ -250,12 +266,13 @@ issuesSheet.getRange(`A1:O${issueRows.length + 1}`).format.wrapText = true;
 issuesSheet.freezePanes.freezeRows(1);
 
 sources.getRange("A1:D1").values = [["Topic", "Definition / rule", "Current source", "Limitation / next step"]];
-sources.getRange("A2:D12").values = [
+sources.getRange("A2:D13").values = [
   ["Read-only", "The exporter uses GET and approved report retrieval only.", "PCS API / authenticated report pages", "No PCS records are changed by collection."],
   ["Coverage", "A year is complete only when Jan 1–Dec 31 has a completed manifest and failures have been reviewed.", "Export manifests", "The 2026 export through August 25 is complete; the calendar year is partial."],
   ["Customers", "Latest full customer snapshot; do not sum snapshots across runs.", "API customers endpoint", "Contains PII; dashboard intentionally shows counts only."],
   ["Products", "Latest full product snapshot; do not sum snapshots across runs.", "API products endpoint", "Product reporting model is not built yet."],
   ["Order value*", "Sum of orderTotal from archived order snapshots.", "API order detail", "Not equivalent to cash-accounting sales."],
+  ["Calculated revenue*", "For each non-cancelled order: max(0, orderTotal minus balanceDue), grouped by order month.", "API order detail", "Historical estimate; validated against PCS where PCS data exists."],
   ["PCS revenue", "Total payments taken month over month.", "PCS Revenue By Month report", "Current report runs through August 27, 2026."],
   ["Archived net payments*", "Payments less refunds recorded on archived order snapshots; unpaid orders contribute $0.", "API order detail", "Grouped by order month; diagnostic only, not PCS revenue."],
   ["Payments on orders*", "Sum of totalPayments recorded on archived order snapshots.", "API order detail", "No payment/refund transaction-date allocation yet."],
@@ -264,11 +281,11 @@ sources.getRange("A2:D12").values = [
   ["Sales Analysis", "Requires order data plus user and tag mappings.", "PCS report definition", "User/tag mappings still need collection."],
 ];
 sources.getRange("A1:D1").format = headerFormat;
-sources.getRange("A1:D12").format.borders = thinGrid.borders;
+sources.getRange("A1:D13").format.borders = thinGrid.borders;
 sources.getRange("A:D").format.columnWidth = 28;
 sources.getRange("B:B").format.columnWidth = 52;
 sources.getRange("D:D").format.columnWidth = 44;
-sources.getRange("A1:D12").format.wrapText = true;
+sources.getRange("A1:D13").format.wrapText = true;
 sources.freezePanes.freezeRows(1);
 
 await fs.mkdir(outputDir, { recursive: true });
