@@ -6,7 +6,7 @@ const root = process.cwd();
 const exportsDir = path.join(root, "exports");
 const outputDir = path.join(root, "dashboard-output");
 const outputPath = path.join(outputDir, "PCS Archive Dashboard.xlsx");
-const archiveVersion = "1.0";
+const archiveVersion = "1.1";
 
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
@@ -147,7 +147,7 @@ dashboard.getRange("D10:H10").format = headerFormat;
 dashboard.getRange("D11:H15").values = [
   ["Report", "Data basis", "Current state", "Next dependency", "Use now?"],
   ["Sales by Product (Cash)", "Payments + order items", "Model pending", "Payment transaction dates", "No"],
-  ["Revenue by Month", "Payment transactions", "Model pending", "Payment transaction export", "No"],
+  ["Revenue by Month*", "Archived order totals", "Available with caveat", "Payment transactions for cash basis", "Yes*"],
   ["Sales by Hour", "Order/event timestamps", "Preliminary", "Tag configuration", "Partial"],
   ["Sales Analysis", "Orders + users + tags", "Preliminary", "User/tag mappings", "Partial"],
 ];
@@ -155,15 +155,26 @@ dashboard.getRange("D11:H11").format = headerFormat;
 dashboard.getRange("D11:H15").format.borders = thinGrid.borders;
 dashboard.getRange("D11:H15").format.wrapText = true;
 
-const chartData = monthlyRows.map((r) => [r.month, r.orders]);
-dashboard.getRange(`A17:B${17 + chartData.length}`).values = [["Month", "Orders"], ...chartData];
-dashboard.getRange("A17:B17").format = headerFormat;
+const chartData = monthlyRows.map((r) => [r.month, r.orders, r.orderValue]);
+dashboard.getRange(`A17:C${17 + chartData.length}`).values = [["Month", "Orders", "Revenue*"], ...chartData];
+dashboard.getRange("A17:C17").format = headerFormat;
+dashboard.getRange(`B18:B${17 + chartData.length}`).format.numberFormat = "#,##0";
+dashboard.getRange(`C18:C${17 + chartData.length}`).format.numberFormat = "$#,##0.00";
 const ordersChart = dashboard.charts.add("line", dashboard.getRange(`A17:B${17 + chartData.length}`));
 ordersChart.title = "Archived orders by month";
 ordersChart.hasLegend = false;
 ordersChart.xAxis = { axisType: "textAxis" };
 ordersChart.yAxis = { numberFormatCode: "#,##0" };
 ordersChart.setPosition("D17", "H32");
+const revenueChart = dashboard.charts.add("line", { chartType: "line", title: "Archived order value by month*", hasLegend: false });
+const revenueSeries = revenueChart.series.add("Revenue*");
+revenueSeries.categoryFormula = `'Dashboard'!$A$18:$A$${17 + chartData.length}`;
+revenueSeries.formula = `'Dashboard'!$C$18:$C$${17 + chartData.length}`;
+revenueChart.title = "Archived order value by month*";
+revenueChart.hasLegend = false;
+revenueChart.xAxis = { axisType: "textAxis" };
+revenueChart.yAxis = { numberFormatCode: "$#,##0" };
+revenueChart.setPosition("D34", "H49");
 const dashboardNoteRow = 19 + chartData.length;
 dashboard.getRange(`A${dashboardNoteRow}:H${dashboardNoteRow + 1}`).merge();
 dashboard.getRange(`A${dashboardNoteRow}`).values = [["Important: Order value and payments shown in this workbook come from order snapshots. They are not yet a reproduction of PCS cash-accounting reports, which require payment/refund transaction dates and allocation logic."]];
