@@ -5,8 +5,10 @@ import { SpreadsheetFile, Workbook } from "@oai/artifact-tool";
 const root = process.cwd();
 const exportsDir = path.join(root, "exports");
 const outputDir = path.join(root, "dashboard-output");
-const outputPath = path.join(outputDir, "PCS Archive Dashboard.xlsx");
+const finalOutputDir = path.join(root, "outputs", "pcs-archive-dashboard");
+const outputPath = path.join(finalOutputDir, "PCS Archive Dashboard.xlsx");
 const archiveVersion = "1.5";
+const generatedAt = new Date();
 
 async function readJson(file) {
   return JSON.parse(await fs.readFile(file, "utf8"));
@@ -60,7 +62,19 @@ async function loadRuns() {
     const orders = (await mapLimited(orderDirs, 64, async (orderDir) => {
       const detailFile = path.join(orderDir, "detail.json");
       if (!(await exists(detailFile))) return null;
-      try { return await readJson(detailFile); } catch { return null; }
+      try {
+        const detail = await readJson(detailFile);
+        const itemsFile = path.join(orderDir, "items.json");
+        const customerFile = path.join(orderDir, "customer.json");
+        const partyFile = path.join(orderDir, "party.json");
+        return {
+          ...detail,
+          _archiveItems: (await exists(itemsFile)) ? await readJson(itemsFile) : [],
+          _archiveCustomer: (await exists(customerFile)) ? await readJson(customerFile) : null,
+          _archiveParty: (await exists(partyFile)) ? await readJson(partyFile) : null,
+          _archiveRun: name,
+        };
+      } catch { return null; }
     })).filter(Boolean);
 
     const issueFile = path.join(exportsDir, "reporting", name, "issues.jsonl");
@@ -72,7 +86,53 @@ async function loadRuns() {
   return runs;
 }
 
+async function loadArchiveStatuses() {
+  const entries = await fs.readdir(exportsDir, { withFileTypes: true });
+  const manifests = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const manifestFile = path.join(exportsDir, entry.name, "manifest.json");
+    if (!(await exists(manifestFile))) continue;
+    try {
+      const manifest = await readJson(manifestFile);
+      if (manifest.dateRange?.start) manifests.push({ name: entry.name, manifest });
+    } catch {}
+  }
+  const statuses = [];
+  for (let year = 2013; year <= 2026; year++) {
+    const matching = manifests.filter(({ manifest }) => String(manifest.dateRange.start).startsWith(`${year}-`));
+    matching.sort((a, b) => {
+      const aFull = a.manifest.dateRange.start === `${year}-01-01` && a.manifest.dateRange.end === `${year}-12-31`;
+      const bFull = b.manifest.dateRange.start === `${year}-01-01` && b.manifest.dateRange.end === `${year}-12-31`;
+      return Number(bFull) - Number(aFull) || String(b.manifest.dateRange.end).localeCompare(String(a.manifest.dateRange.end));
+    });
+    const selected = matching[0];
+    if (!selected) {
+      statuses.push({ year, status: "Not started", start: "", end: "", orders: 0, run: "", updated: "", notes: "Awaiting export" });
+      continue;
+    }
+    const { name, manifest } = selected;
+    const orderRoot = path.join(exportsDir, name, "facility-1", "orders");
+    let orders = 0;
+    if (await exists(orderRoot)) orders = (await fs.readdir(orderRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).length;
+    const fullYear = manifest.dateRange.start === `${year}-01-01` && manifest.dateRange.end === `${year}-12-31`;
+    const complete = Boolean(manifest.completedAt);
+    statuses.push({
+      year,
+      status: complete ? (fullYear ? "Complete year" : "Partial year complete") : "In progress / resumable",
+      start: manifest.dateRange.start,
+      end: manifest.dateRange.end,
+      orders,
+      run: name,
+      updated: manifest.completedAt ?? manifest.startedAt ?? "",
+      notes: complete ? (fullYear ? "Calendar-year manifest complete" : "Completed run; calendar-year range is partial") : "Sweep can be rerun; existing files will be skipped",
+    });
+  }
+  return statuses;
+}
+
 const runs = await loadRuns();
+const archiveStatuses = await loadArchiveStatuses();
 const monthly = new Map();
 for (const run of runs) {
   for (const order of run.orders) {
@@ -102,6 +162,25 @@ if (await exists(revenueReportFile)) {
   }
 }
 const monthlyRows = [...monthly.values()].sort((a, b) => a.month.localeCompare(b.month));
+const hourly = new Map();
+for (const run of runs) {
+  for (const order of run.orders) {
+    if (order.cancelDate) continue;
+    const rawTimestamp = order.createdUtc ?? order.orderDate ?? order.lastUpdated ?? order.eventStartDateTime;
+    const match = String(rawTimestamp ?? "").match(/^(\d{4}-\d{2}-\d{2})T(\d{2})/);
+    if (!match) continue;
+    const [, day, hourText] = match;
+    const hour = Number(hourText);
+    const key = `${day}|${hour}`;
+    const row = hourly.get(key) ?? { day, hour, orders: 0, itemQuantity: 0, paidValue: 0, orderValue: 0 };
+    row.orders += 1;
+    row.itemQuantity += (Array.isArray(order._archiveItems) ? order._archiveItems : []).reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+    row.paidValue += Math.max(0, Number(order.totalPayments ?? 0) - Number(order.totalRefunds ?? 0));
+    row.orderValue += Math.max(0, Number(order.orderTotal ?? 0) - Number(order.balanceDue ?? 0));
+    hourly.set(key, row);
+  }
+}
+const hourlyRows = [...hourly.values()].sort((a, b) => a.day.localeCompare(b.day) || a.hour - b.hour);
 const allIssues = runs.flatMap((run) => run.issues.map((issue) => ({ ...issue, sourceRunId: issue.sourceRunId ?? run.name })));
 const totalOrders = runs.reduce((sum, run) => sum + Number(run.facility.orders ?? 0), 0);
 const subresourceFailures = runs.reduce((sum, run) => sum + Number(run.facility.orderSubresourceFailures ?? 0), 0);
@@ -115,6 +194,11 @@ const coverage = workbook.worksheets.add("Coverage");
 const monthlySheet = workbook.worksheets.add("Monthly Orders");
 const issuesSheet = workbook.worksheets.add("Issues");
 const sources = workbook.worksheets.add("Definitions");
+const invoice = workbook.worksheets.add("Invoice Lookup");
+const orderData = workbook.worksheets.add("Order Data");
+const hourlyAnalysis = workbook.worksheets.add("Hourly Date Range");
+const weekCompare = workbook.worksheets.add("Week Over Year");
+const hourlyData = workbook.worksheets.add("Hourly Data");
 
 const headerFormat = {
   fill: "#E5E7EB",
@@ -129,7 +213,7 @@ dashboard.getRange("A1:K1").merge();
 dashboard.getRange("A1").values = [[`PCS ARCHIVE — v${archiveVersion}`]];
 dashboard.getRange("A1:K1").format = titleFormat;
 dashboard.getRange("A2:K3").merge();
-dashboard.getRange("A2").values = [["ARCHIVE COVERAGE — includes May–December 2013 and the completed 2026 year-to-date export through August 25. Calendar-year coverage remains partial; totals below are archived-data totals, not complete lifetime business totals."]];
+dashboard.getRange("A2").values = [[`ARCHIVE STATUS — refreshed ${generatedAt.toLocaleString("en-US", { timeZone: "America/Los_Angeles" })}. Coverage reflects completed manifests; the Coverage sheet also shows resumable sweeps currently in progress.`]];
 dashboard.getRange("A2:K3").format = { fill: "#FEF3C7", font: { color: "#92400E", bold: true }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
 
 dashboard.getRange("A5:B5").values = [["Archived orders", totalOrders]];
@@ -206,28 +290,22 @@ dashboard.getRange("A:A").format.columnWidth = 23;
 dashboard.getRange("D:D").format.columnWidth = 26;
 dashboard.getRange("F:F").format.columnWidth = 24;
 
-const coverageRows = [];
-for (let year = 2013; year <= 2026; year++) {
-  const matching = runs.filter((run) => String(run.manifest.dateRange.start).startsWith(String(year)));
-  const orders = matching.reduce((sum, run) => sum + Number(run.facility.orders ?? 0), 0);
-  const starts = matching.map((run) => run.manifest.dateRange.start);
-  const ends = matching.map((run) => run.manifest.dateRange.end);
-  const fullYear = starts.includes(`${year}-01-01`) && ends.includes(`${year}-12-31`);
-  const status = fullYear ? "Complete year" : matching.length ? "Partial year / export complete" : "Not collected";
-  coverageRows.push([year, status, starts.join(", "), ends.join(", "), orders, matching.map((run) => run.name).join(", "), matching.length ? (fullYear ? "Complete calendar-year export" : "Completed run(s), incomplete calendar year") : "Awaiting export"]);
-}
-coverage.getRange("A1:G1").values = [["Year", "Coverage status", "Archived start", "Archived end", "Orders", "Source run", "Notes"]];
-coverage.getRange(`A2:G${coverageRows.length + 1}`).values = coverageRows;
-coverage.getRange("A1:G1").format = headerFormat;
-coverage.getRange(`A1:G${coverageRows.length + 1}`).format.borders = thinGrid.borders;
+const coverageRows = archiveStatuses.map((s) => [s.year, s.status, s.start, s.end, s.orders, s.run, s.updated ? new Date(s.updated) : "", s.notes]);
+coverage.getRange("A1:H1").values = [["Year", "Coverage status", "Requested start", "Requested end", "Orders on disk", "Source run", "Last manifest update", "Notes"]];
+coverage.getRange(`A2:H${coverageRows.length + 1}`).values = coverageRows;
+coverage.getRange("A1:H1").format = headerFormat;
+coverage.getRange(`A1:H${coverageRows.length + 1}`).format.borders = thinGrid.borders;
 coverage.getRange("A:A").format.columnWidth = 10;
 coverage.getRange("B:B").format.columnWidth = 20;
 coverage.getRange("C:D").format.columnWidth = 16;
 coverage.getRange("E:E").format.numberFormat = "#,##0";
 coverage.getRange("F:F").format.columnWidth = 24;
-coverage.getRange("G:G").format.columnWidth = 34;
-coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("containsText", { text: "Not collected", format: { fill: "#FEE2E2", font: { color: "#991B1B" } } });
+coverage.getRange("G:G").format.columnWidth = 24;
+coverage.getRange(`G2:G${coverageRows.length + 1}`).format.numberFormat = "yyyy-mm-dd hh:mm";
+coverage.getRange("H:H").format.columnWidth = 42;
+coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("containsText", { text: "Not started", format: { fill: "#FEE2E2", font: { color: "#991B1B" } } });
 coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("containsText", { text: "Partial", format: { fill: "#FEF3C7", font: { color: "#92400E" } } });
+coverage.getRange(`B2:B${coverageRows.length + 1}`).conditionalFormats.add("containsText", { text: "In progress", format: { fill: "#DBEAFE", font: { color: "#1E40AF", bold: true } } });
 coverage.freezePanes.freezeRows(1);
 
 monthlySheet.getRange("A1:M1").values = [["Month", "Orders", "Calculated revenue*", "PCS revenue", "Difference", "Variance %", "Archived net payments*", "Archived payments*", "Archived refunds*", "Order value*", "Balance due", "Cancelled", "Closed"]];
@@ -288,11 +366,251 @@ sources.getRange("D:D").format.columnWidth = 44;
 sources.getRange("A1:D13").format.wrapText = true;
 sources.freezePanes.freezeRows(1);
 
+const invoiceIndexLimit = 20000;
+const archivedOrders = runs.flatMap((run) => run.orders)
+  .filter((order) => order.orderNumber != null)
+  .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
+  .slice(-invoiceIndexLimit);
+const orderRows = archivedOrders
+  .filter((order) => order.orderNumber != null)
+  .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
+  .map((order) => {
+    const customer = order._archiveCustomer ?? {};
+    const party = order._archiveParty ?? {};
+    const address = [customer.address1, customer.address2, customer.city, customer.state, customer.zip].filter(Boolean).join(", ");
+    const lineSummary = (Array.isArray(order._archiveItems) ? order._archiveItems : []).map((item, index) => {
+      const qty = Number(item.quantity ?? 0);
+      const unit = Number(item.listPrice ?? item.price ?? 0);
+      const discount = Number(item.discount ?? 0);
+      const tax = Number(item.tax ?? 0);
+      const archivedExtended = Number(item.priceExtended ?? item.listPriceExtended ?? 0);
+      const extended = archivedExtended || (qty * unit - discount + tax);
+      return `${index + 1}. ${qty} × ${item.productName ?? item.name ?? "Item"} | ${item.category ?? "Uncategorized"} | Unit $${unit.toFixed(2)} | Discount $${discount.toFixed(2)} | Tax $${tax.toFixed(2)} | Extended $${extended.toFixed(2)}`;
+    }).join("\n");
+    return [
+      Number(order.orderNumber), Number(order.orderId ?? order.id ?? 0), order.orderDate ?? "",
+      customer.fullName ?? customer.name ?? "", address, customer.email ?? "", customer.phoneNumber ?? "",
+      order.eventStartDateTime ?? order.startDateTime ?? party.startDateTime ?? "", String(order.statusCode ?? order.status ?? ""),
+      Number(order.subTotal ?? 0), Number(order.tax ?? 0), Number(order.tip ?? 0), Number(order.orderTotal ?? 0),
+      Number(order.totalPayments ?? 0), Number(order.totalRefunds ?? 0), Number(order.balanceDue ?? 0),
+      order.notesPrintedOnInvoice ? (order.notes ?? "") : "", order._archiveRun ?? "", lineSummary,
+    ];
+  });
+
+const orderHeaders = ["Order Number", "Order ID", "Order Date", "Customer", "Address", "Email", "Phone", "Event Start", "Status Code", "Subtotal", "Tax", "Tip", "Order Total", "Payments", "Refunds", "Balance Due", "Invoice Notes", "Archive Run", "Archived Line Items"];
+orderData.getRange("A1:S1").values = [orderHeaders];
+if (orderRows.length) orderData.getRange(`A2:S${orderRows.length + 1}`).values = orderRows;
+orderData.getRange("A1:S1").format = headerFormat;
+orderData.getRange(`J2:P${Math.max(orderRows.length + 1, 2)}`).format.numberFormat = "$#,##0.00";
+orderData.getRange("A:B").format.numberFormat = "0";
+orderData.getRange("A:S").format.columnWidth = 16;
+orderData.getRange("D:E").format.columnWidth = 28;
+orderData.getRange("Q:S").format.columnWidth = 28;
+orderData.freezePanes.freezeRows(1);
+
+const orderLastRow = Math.max(orderRows.length + 1, 2);
+const defaultOrderNumber = orderRows.at(-1)?.[0] ?? "";
+const lookup = (column, fallback = "") => `=IFERROR(INDEX('Order Data'!$${column}$2:$${column}$${orderLastRow},MATCH($B$3,'Order Data'!$A$2:$A$${orderLastRow},0)),"${fallback}")`;
+invoice.showGridLines = false;
+invoice.getRange("A1:H1").merge();
+invoice.getRange("A1").values = [["PCS ARCHIVE — REBUILT INVOICE"]];
+invoice.getRange("A1:H1").format = { fill: "#111827", font: { bold: true, color: "#FFFFFF", size: 18 }, horizontalAlignment: "center" };
+invoice.getRange("A3").values = [["Enter order number"]];
+invoice.getRange("B3").values = [[defaultOrderNumber]];
+invoice.getRange("A3:B3").format = { fill: "#DBEAFE", font: { bold: true, color: "#1E3A8A" }, borders: { preset: "outside", style: "medium", color: "#2563EB" } };
+invoice.getRange("B3").format.numberFormat = "0";
+invoice.getRange("D3").values = [["Order date"]];
+invoice.getRange("E3").formulas = [[lookup("C", "Order not found")]];
+invoice.getRange("G3").values = [["Order ID"]];
+invoice.getRange("H3").formulas = [[lookup("B")]];
+invoice.getRange("A5").values = [["Bill to"]];
+invoice.getRange("B5:D5").merge();
+invoice.getRange("B5").formulas = [[lookup("D", "Order not found")]];
+invoice.getRange("A6").values = [["Address"]];
+invoice.getRange("B6:D6").merge();
+invoice.getRange("B6").formulas = [[lookup("E")]];
+invoice.getRange("A7").values = [["Email"]];
+invoice.getRange("B7:D7").merge();
+invoice.getRange("B7").formulas = [[lookup("F")]];
+invoice.getRange("A8").values = [["Phone"]];
+invoice.getRange("B8:D8").merge();
+invoice.getRange("B8").formulas = [[lookup("G")]];
+invoice.getRange("F5").values = [["Event start"]];
+invoice.getRange("G5:H5").merge();
+invoice.getRange("G5").formulas = [[lookup("H")]];
+invoice.getRange("F6").values = [["Status code"]];
+invoice.getRange("G6:H6").merge();
+invoice.getRange("G6").formulas = [[lookup("I")]];
+invoice.getRange("A10:H10").values = [["Line", "Description", "Category", "Qty", "Unit price", "Discount", "Tax", "Extended"]];
+invoice.getRange("A10:H10").format = headerFormat;
+invoice.getRange("A11:H60").merge();
+invoice.getRange("A11").formulas = [[lookup("S", "No archived line items")]];
+invoice.getRange("A11:H60").format = { wrapText: true, verticalAlignment: "top", borders: { preset: "outside", style: "thin", color: "#D1D5DB" } };
+invoice.getRange("F63").values = [["Subtotal"]]; invoice.getRange("H63").formulas = [[lookup("J")]];
+invoice.getRange("F64").values = [["Tax"]]; invoice.getRange("H64").formulas = [[lookup("K")]];
+invoice.getRange("F65").values = [["Tip"]]; invoice.getRange("H65").formulas = [[lookup("L")]];
+invoice.getRange("F66").values = [["Order total"]]; invoice.getRange("H66").formulas = [[lookup("M")]];
+invoice.getRange("F67").values = [["Payments"]]; invoice.getRange("H67").formulas = [[lookup("N")]];
+invoice.getRange("F68").values = [["Refunds"]]; invoice.getRange("H68").formulas = [[lookup("O")]];
+invoice.getRange("F69").values = [["Balance due"]]; invoice.getRange("H69").formulas = [[lookup("P")]];
+invoice.getRange("F63:H69").format = { borders: { preset: "all", style: "thin", color: "#D1D5DB" }, font: { bold: true } };
+invoice.getRange("H63:H69").format.numberFormat = "$#,##0.00";
+invoice.getRange("A63").values = [["Invoice notes"]];
+invoice.getRange("A64:E69").merge();
+invoice.getRange("A64").formulas = [[lookup("Q")]];
+invoice.getRange("A64:E69").format = { wrapText: true, fill: "#F9FAFB", borders: { preset: "outside", style: "thin", color: "#D1D5DB" } };
+invoice.getRange("A71:H72").merge();
+invoice.getRange("A71").values = [[`This invoice is reconstructed from archived PCS API fields. The archived order total is authoritative; line-item extensions are reconstructed when PCS did not return an extended amount. For workbook performance, lookup currently indexes the newest ${invoiceIndexLimit.toLocaleString("en-US")} archived order numbers.`]];
+invoice.getRange("A71:H72").format = { fill: "#FEF3C7", font: { italic: true, color: "#92400E" }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
+invoice.getRange("A:A").format.columnWidth = 18;
+invoice.getRange("B:B").format.columnWidth = 24;
+invoice.getRange("C:C").format.columnWidth = 22;
+invoice.getRange("D:D").format.columnWidth = 10;
+invoice.getRange("E:H").format.columnWidth = 15;
+invoice.freezePanes.freezeRows(3);
+
+const hourlyLastRow = Math.max(hourlyRows.length + 1, 2);
+hourlyData.getRange("A1:F1").values = [["Date", "Hour", "Orders", "Item quantity", "Paid value*", "Order value*"]];
+if (hourlyRows.length) {
+  hourlyData.getRange(`A2:F${hourlyRows.length + 1}`).values = hourlyRows.map((row) => [
+    new Date(`${row.day}T00:00:00`), row.hour, row.orders, row.itemQuantity, row.paidValue, row.orderValue,
+  ]);
+}
+hourlyData.getRange("A1:F1").format = headerFormat;
+hourlyData.getRange(`A2:A${hourlyLastRow}`).format.numberFormat = "yyyy-mm-dd";
+hourlyData.getRange(`B2:D${hourlyLastRow}`).format.numberFormat = "#,##0";
+hourlyData.getRange(`E2:F${hourlyLastRow}`).format.numberFormat = "$#,##0.00";
+hourlyData.getRange("A:F").format.columnWidth = 16;
+hourlyData.freezePanes.freezeRows(1);
+
+hourlyAnalysis.showGridLines = false;
+hourlyAnalysis.getRange("A1:J1").merge();
+hourlyAnalysis.getRange("A1").values = [["HOURLY SALES - DATE RANGE"]];
+hourlyAnalysis.getRange("A1:J1").format = { fill: "#111827", font: { bold: true, color: "#FFFFFF", size: 18 }, horizontalAlignment: "center" };
+hourlyAnalysis.getRange("A3").values = [["Start date"]];
+hourlyAnalysis.getRange("B3").values = [[new Date("2026-08-03T00:00:00")]];
+hourlyAnalysis.getRange("C3").values = [["End date"]];
+hourlyAnalysis.getRange("D3").values = [[new Date("2026-08-09T00:00:00")]];
+hourlyAnalysis.getRange("E3").values = [["Sales metric"]];
+hourlyAnalysis.getRange("F3").values = [["Paid value"]];
+hourlyAnalysis.getRange("F3").dataValidation = { rule: { type: "list", values: ["Paid value", "Order value"] } };
+hourlyAnalysis.getRange("A3:F3").format = { fill: "#DBEAFE", font: { bold: true, color: "#1E3A8A" }, borders: { preset: "outside", style: "thin", color: "#2563EB" } };
+hourlyAnalysis.getRange("B3:D3").format.numberFormat = "yyyy-mm-dd";
+hourlyAnalysis.getRange("A5:E5").values = [["Hour", "Orders", "Item quantity", "Sales", "Average / order"]];
+hourlyAnalysis.getRange("A5:E5").format = headerFormat;
+const hourlySummaryRows = Array.from({ length: 24 }, (_, hour) => [hour, null, null, null, null]);
+hourlyAnalysis.getRange("A6:E29").values = hourlySummaryRows;
+for (let row = 6; row <= 29; row++) {
+  hourlyAnalysis.getRange(`B${row}`).formulas = [[`=SUMIFS('Hourly Data'!$C$2:$C$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},">="&$B$3,'Hourly Data'!$A$2:$A$${hourlyLastRow},"<="&$D$3,'Hourly Data'!$B$2:$B$${hourlyLastRow},$A${row})`]];
+  hourlyAnalysis.getRange(`C${row}`).formulas = [[`=SUMIFS('Hourly Data'!$D$2:$D$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},">="&$B$3,'Hourly Data'!$A$2:$A$${hourlyLastRow},"<="&$D$3,'Hourly Data'!$B$2:$B$${hourlyLastRow},$A${row})`]];
+  hourlyAnalysis.getRange(`D${row}`).formulas = [[`=IF($F$3="Paid value",SUMIFS('Hourly Data'!$E$2:$E$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},">="&$B$3,'Hourly Data'!$A$2:$A$${hourlyLastRow},"<="&$D$3,'Hourly Data'!$B$2:$B$${hourlyLastRow},$A${row}),SUMIFS('Hourly Data'!$F$2:$F$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},">="&$B$3,'Hourly Data'!$A$2:$A$${hourlyLastRow},"<="&$D$3,'Hourly Data'!$B$2:$B$${hourlyLastRow},$A${row}))`]];
+  hourlyAnalysis.getRange(`E${row}`).formulas = [[`=IFERROR(D${row}/B${row},0)`]];
+}
+hourlyAnalysis.getRange("A6:A29").format.numberFormat = "00\:00";
+hourlyAnalysis.getRange("B6:C29").format.numberFormat = "#,##0";
+hourlyAnalysis.getRange("D6:E29").format.numberFormat = "$#,##0.00";
+hourlyAnalysis.getRange("A5:E29").format.borders = thinGrid.borders;
+const hourlyChart = hourlyAnalysis.charts.add("line", { chartType: "line", title: "Sales by hour", hasLegend: false });
+const hourlySeries = hourlyChart.series.add("Sales");
+hourlySeries.categoryFormula = `'Hourly Date Range'!$A$6:$A$29`;
+hourlySeries.formula = `'Hourly Date Range'!$D$6:$D$29`;
+hourlyChart.yAxis = { numberFormatCode: "$#,##0" };
+hourlyChart.xAxis = { axisType: "textAxis" };
+hourlyChart.setPosition("G5", "N19");
+hourlyAnalysis.getRange("A32:Y32").merge();
+hourlyAnalysis.getRange("A32").values = [["DAY-BY-DAY / HOUR-BY-HOUR SALES (first 21 days of selected range)"]];
+hourlyAnalysis.getRange("A32:Y32").format = headerFormat;
+hourlyAnalysis.getRange("A33:Y33").values = [["Date", ...Array.from({ length: 24 }, (_, hour) => `${String(hour).padStart(2, "0")}:00`)]];
+hourlyAnalysis.getRange("A33:Y33").format = headerFormat;
+hourlyAnalysis.getRange("A34").formulas = [["=$B$3"]];
+for (let row = 35; row <= 54; row++) hourlyAnalysis.getRange(`A${row}`).formulas = [[`=IF(A${row - 1}+1<=$D$3,A${row - 1}+1,"")`]];
+for (let row = 34; row <= 54; row++) {
+  for (let col = 0; col < 24; col++) {
+    const column = String.fromCharCode(66 + col);
+    hourlyAnalysis.getRange(`${column}${row}`).formulas = [[`=IF($A${row}="","",IF($F$3="Paid value",SUMIFS('Hourly Data'!$E$2:$E$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},$A${row},'Hourly Data'!$B$2:$B$${hourlyLastRow},${col}),SUMIFS('Hourly Data'!$F$2:$F$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},$A${row},'Hourly Data'!$B$2:$B$${hourlyLastRow},${col})))`]];
+  }
+}
+hourlyAnalysis.getRange("A34:A54").format.numberFormat = "yyyy-mm-dd";
+hourlyAnalysis.getRange("B34:Y54").format.numberFormat = "$#,##0";
+hourlyAnalysis.getRange("B34:Y54").conditionalFormats.add("colorScale", { colors: ["#FFFFFF", "#BFDBFE", "#1D4ED8"], thresholds: ["min", "50%", "max"] });
+hourlyAnalysis.getRange("A33:Y54").format.borders = thinGrid.borders;
+hourlyAnalysis.getRange("A55:Y56").merge();
+hourlyAnalysis.getRange("A55").values = [["Preliminary archive analysis. PCS Sales By Hour uses item-level transaction timestamps, tag membership, quantity, and discounts. Those fields are not yet fully available in the archive. Paid value = archived payments less refunds; Order value = non-cancelled order total less balance due."]];
+hourlyAnalysis.getRange("A55:Y56").format = { fill: "#FEF3C7", font: { italic: true, color: "#92400E" }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
+hourlyAnalysis.getRange("A:A").format.columnWidth = 14;
+hourlyAnalysis.getRange("B:Y").format.columnWidth = 11;
+hourlyAnalysis.freezePanes.freezeRows(3);
+
+weekCompare.showGridLines = false;
+weekCompare.getRange("A1:K1").merge();
+weekCompare.getRange("A1").values = [["WEEK-OVER-YEAR SALES COMPARISON"]];
+weekCompare.getRange("A1:K1").format = { fill: "#111827", font: { bold: true, color: "#FFFFFF", size: 18 }, horizontalAlignment: "center" };
+weekCompare.getRange("A3").values = [["Reference week start"]];
+weekCompare.getRange("B3").values = [[new Date("2026-08-03T00:00:00")]];
+weekCompare.getRange("D3").values = [["Sales metric"]];
+weekCompare.getRange("E3").values = [["Paid value"]];
+weekCompare.getRange("E3").dataValidation = { rule: { type: "list", values: ["Paid value", "Order value"] } };
+weekCompare.getRange("A4").values = [["Weekday alignment"]];
+weekCompare.getRange("B4").values = [[364]];
+weekCompare.getRange("C4:E4").merge();
+weekCompare.getRange("C4").values = [["days back per comparison year (52 weeks)"]];
+weekCompare.getRange("A3:E4").format = { fill: "#DBEAFE", font: { bold: true, color: "#1E3A8A" }, borders: { preset: "outside", style: "thin", color: "#2563EB" } };
+weekCompare.getRange("B3").format.numberFormat = "yyyy-mm-dd";
+weekCompare.getRange("A6:L6").values = [["Year", "Week start", "Week end", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun", "Week sales", "Orders"]];
+weekCompare.getRange("A6:L6").format = headerFormat;
+for (let row = 7; row <= 16; row++) {
+  const offset = row - 7;
+  weekCompare.getRange(`B${row}`).formulas = [[offset === 0 ? "=$B$3" : `=$B$3-$B$4*${offset}`]];
+  weekCompare.getRange(`A${row}`).formulas = [[`=YEAR(B${row})`]];
+  weekCompare.getRange(`C${row}`).formulas = [[`=B${row}+6`]];
+  for (let dayOffset = 0; dayOffset < 7; dayOffset++) {
+    const column = String.fromCharCode(68 + dayOffset);
+    weekCompare.getRange(`${column}${row}`).formulas = [[`=IF($E$3="Paid value",SUMIFS('Hourly Data'!$E$2:$E$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},$B${row}+${dayOffset}),SUMIFS('Hourly Data'!$F$2:$F$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},$B${row}+${dayOffset}))`]];
+  }
+  weekCompare.getRange(`K${row}`).formulas = [[`=SUM(D${row}:J${row})`]];
+  weekCompare.getRange(`L${row}`).formulas = [[`=SUMIFS('Hourly Data'!$C$2:$C$${hourlyLastRow},'Hourly Data'!$A$2:$A$${hourlyLastRow},">="&B${row},'Hourly Data'!$A$2:$A$${hourlyLastRow},"<="&C${row})`]];
+}
+weekCompare.getRange("B7:C16").format.numberFormat = "yyyy-mm-dd";
+weekCompare.getRange("D7:K16").format.numberFormat = "$#,##0";
+weekCompare.getRange("L7:L16").format.numberFormat = "#,##0";
+weekCompare.getRange("A6:L16").format.borders = thinGrid.borders;
+weekCompare.getRange("D7:J16").conditionalFormats.add("colorScale", { colors: ["#FFFFFF", "#BFDBFE", "#1D4ED8"], thresholds: ["min", "50%", "max"] });
+const weekChart = weekCompare.charts.add("line", { chartType: "line", title: "Aligned week sales by year", hasLegend: false });
+const weekSeries = weekChart.series.add("Week sales");
+weekSeries.categoryFormula = `'Week Over Year'!$A$7:$A$16`;
+weekSeries.formula = `'Week Over Year'!$K$7:$K$16`;
+weekChart.yAxis = { numberFormatCode: "$#,##0" };
+weekChart.xAxis = { axisType: "textAxis" };
+weekChart.setPosition("A19", "H34");
+weekCompare.getRange("I19:L27").merge();
+weekCompare.getRange("I19").values = [["How to use\n\nChoose the Monday of the holiday/event week in B3. Prior rows step back exactly 52 weeks, preserving Monday-Sunday alignment. For holidays whose timing shifts differently, overwrite a Week start cell with the exact comparison Monday you want."]];
+weekCompare.getRange("I19:L27").format = { fill: "#F3F4F6", wrapText: true, verticalAlignment: "top", borders: { preset: "outside", style: "thin", color: "#D1D5DB" } };
+weekCompare.getRange("A36:L37").merge();
+weekCompare.getRange("A36").values = [["Preliminary archive analysis using the same metric definitions as Hourly Date Range. It is intended for operational comparisons, not exact reconciliation to PCS Sales By Hour until transaction timestamps and tag configuration are archived."]];
+weekCompare.getRange("A36:L37").format = { fill: "#FEF3C7", font: { italic: true, color: "#92400E" }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
+weekCompare.getRange("A:A").format.columnWidth = 12;
+weekCompare.getRange("B:C").format.columnWidth = 15;
+weekCompare.getRange("D:J").format.columnWidth = 13;
+weekCompare.getRange("K:L").format.columnWidth = 16;
+weekCompare.freezePanes.freezeRows(4);
+
+sources.getRange("A14:D14").values = [["Sales By Hour", "Seven-day PCS report with hours as rows and each day showing transaction quantity and sales.", "PCS Sales By Hour reference PDF dated 2026-08-28", "Workbook version is preliminary until item-level transaction timestamps and product-tag membership are archived."]];
+sources.getRange("A14:D14").format = { ...thinGrid, wrapText: true };
+
 await fs.mkdir(outputDir, { recursive: true });
-for (const sheetName of ["Dashboard", "Coverage", "Monthly Orders", "Issues", "Definitions"]) {
+await fs.mkdir(finalOutputDir, { recursive: true });
+for (const sheetName of ["Dashboard", "Coverage", "Monthly Orders", "Issues", "Definitions", "Invoice Lookup", "Order Data", "Hourly Date Range", "Week Over Year", "Hourly Data"]) {
+  const previewRanges = {
+    "Issues": "A1:O40",
+    "Invoice Lookup": "A1:H72",
+    "Order Data": "A1:S30",
+    "Hourly Date Range": "A1:Y56",
+    "Week Over Year": "A1:L37",
+    "Hourly Data": "A1:F30",
+  };
   const preview = await workbook.render({
     sheetName,
-    range: sheetName === "Issues" ? "A1:O40" : undefined,
+    range: previewRanges[sheetName],
     autoCrop: "all",
     scale: 1,
     format: "png",
@@ -307,4 +625,4 @@ await fs.writeFile(path.join(outputDir, "formula-errors.txt"), errors.ndjson ?? 
 
 const output = await SpreadsheetFile.exportXlsx(workbook);
 await output.save(outputPath);
-console.log(JSON.stringify({ outputPath, runs: runs.length, orders: totalOrders, issues: allIssues.length, monthlyRows: monthlyRows.length }, null, 2));
+console.log(JSON.stringify({ outputPath, runs: runs.length, orders: totalOrders, issues: allIssues.length, monthlyRows: monthlyRows.length, invoiceOrders: orderRows.length, hourlyRows: hourlyRows.length }, null, 2));
