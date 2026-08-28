@@ -65,13 +65,11 @@ async function loadRuns() {
       try {
         const detail = await readJson(detailFile);
         const itemsFile = path.join(orderDir, "items.json");
-        const customerFile = path.join(orderDir, "customer.json");
-        const partyFile = path.join(orderDir, "party.json");
+        const items = (await exists(itemsFile)) ? await readJson(itemsFile) : [];
         return {
           ...detail,
-          _archiveItems: (await exists(itemsFile)) ? await readJson(itemsFile) : [],
-          _archiveCustomer: (await exists(customerFile)) ? await readJson(customerFile) : null,
-          _archiveParty: (await exists(partyFile)) ? await readJson(partyFile) : null,
+          _archiveItemQuantity: (Array.isArray(items) ? items : []).reduce((sum, item) => sum + Number(item.quantity ?? 0), 0),
+          _archiveOrderDir: orderDir,
           _archiveRun: name,
         };
       } catch { return null; }
@@ -174,7 +172,7 @@ for (const run of runs) {
     const key = `${day}|${hour}`;
     const row = hourly.get(key) ?? { day, hour, orders: 0, itemQuantity: 0, paidValue: 0, orderValue: 0 };
     row.orders += 1;
-    row.itemQuantity += (Array.isArray(order._archiveItems) ? order._archiveItems : []).reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
+    row.itemQuantity += Number(order._archiveItemQuantity ?? 0);
     row.paidValue += Math.max(0, Number(order.totalPayments ?? 0) - Number(order.totalRefunds ?? 0));
     row.orderValue += Math.max(0, Number(order.orderTotal ?? 0) - Number(order.balanceDue ?? 0));
     hourly.set(key, row);
@@ -367,10 +365,21 @@ sources.getRange("A1:D13").format.wrapText = true;
 sources.freezePanes.freezeRows(1);
 
 const invoiceIndexLimit = 20000;
-const archivedOrders = runs.flatMap((run) => run.orders)
+const invoiceCandidates = runs.flatMap((run) => run.orders)
   .filter((order) => order.orderNumber != null)
   .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
   .slice(-invoiceIndexLimit);
+const archivedOrders = await mapLimited(invoiceCandidates, 64, async (order) => {
+  const itemsFile = path.join(order._archiveOrderDir, "items.json");
+  const customerFile = path.join(order._archiveOrderDir, "customer.json");
+  const partyFile = path.join(order._archiveOrderDir, "party.json");
+  return {
+    ...order,
+    _archiveItems: (await exists(itemsFile)) ? await readJson(itemsFile) : [],
+    _archiveCustomer: (await exists(customerFile)) ? await readJson(customerFile) : null,
+    _archiveParty: (await exists(partyFile)) ? await readJson(partyFile) : null,
+  };
+});
 const orderRows = archivedOrders
   .filter((order) => order.orderNumber != null)
   .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
