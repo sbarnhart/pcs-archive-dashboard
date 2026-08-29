@@ -348,14 +348,17 @@ monthlySheet.freezePanes.freezeRows(1);
 const issueHeaders = ["Issue ID", "Run", "Order #", "Priority", "Issue type", "Description", "Balance due", "Order total", "Payments", "Cancel date", "Status", "Assigned to", "Resolution notes", "Resolved at", "Verified run"];
 issuesSheet.getRange(`A1:O1`).values = [issueHeaders];
 const issueRows = allIssues.map((i) => [i.issueId, i.sourceRunId, i.orderNumber, i.priority, i.issueType, i.description, Number(i.balanceDue ?? 0), Number(i.orderTotal ?? 0), Number(i.totalPayments ?? 0), i.cancelDate ?? "", i.status ?? "New", i.assignedTo ?? "", i.resolutionNotes ?? "", i.resolvedAt ?? "", i.verifiedRunId ?? ""]);
-issuesSheet.getRange(`A2:O${issueRows.length + 1}`).values = issueRows;
 issuesSheet.getRange("A1:O1").format = headerFormat;
-issuesSheet.getRange(`A1:O${issueRows.length + 1}`).format.borders = thinGrid.borders;
-issuesSheet.getRange(`G2:I${issueRows.length + 1}`).format.numberFormat = "$#,##0.00";
-issuesSheet.getRange(`D2:D${issueRows.length + 1}`).dataValidation = { rule: { type: "list", values: ["High", "Medium", "Low"] } };
-issuesSheet.getRange(`K2:K${issueRows.length + 1}`).dataValidation = { rule: { type: "list", values: ["New", "Investigating", "Corrected in PCS", "Verified", "Won't fix"] } };
-issuesSheet.getRange(`D2:D${issueRows.length + 1}`).conditionalFormats.add("containsText", { text: "High", format: { fill: "#FEE2E2", font: { color: "#991B1B", bold: true } } });
-issuesSheet.getRange(`K2:K${issueRows.length + 1}`).conditionalFormats.add("containsText", { text: "Verified", format: { fill: "#DCFCE7", font: { color: "#166534" } } });
+if (issueRows.length) {
+  const issueLastRow = issueRows.length + 1;
+  issuesSheet.getRange(`A2:O${issueLastRow}`).values = issueRows;
+  issuesSheet.getRange(`A1:O${issueLastRow}`).format.borders = thinGrid.borders;
+  issuesSheet.getRange(`G2:I${issueLastRow}`).format.numberFormat = "$#,##0.00";
+  issuesSheet.getRange(`D2:D${issueLastRow}`).dataValidation = { rule: { type: "list", values: ["High", "Medium", "Low"] } };
+  issuesSheet.getRange(`K2:K${issueLastRow}`).dataValidation = { rule: { type: "list", values: ["New", "Investigating", "Corrected in PCS", "Verified", "Won't fix"] } };
+  issuesSheet.getRange(`D2:D${issueLastRow}`).conditionalFormats.add("containsText", { text: "High", format: { fill: "#FEE2E2", font: { color: "#991B1B", bold: true } } });
+  issuesSheet.getRange(`K2:K${issueLastRow}`).conditionalFormats.add("containsText", { text: "Verified", format: { fill: "#DCFCE7", font: { color: "#166534" } } });
+}
 issuesSheet.getRange("A:B").format.columnWidth = 24;
 issuesSheet.getRange("C:E").format.columnWidth = 16;
 issuesSheet.getRange("F:F").format.columnWidth = 48;
