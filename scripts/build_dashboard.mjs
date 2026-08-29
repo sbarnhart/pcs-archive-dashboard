@@ -390,7 +390,7 @@ sources.getRange("D:D").format.columnWidth = 44;
 sources.getRange("A1:D13").format.wrapText = true;
 sources.freezePanes.freezeRows(1);
 
-const invoiceIndexLimit = 20000;
+const invoiceIndexLimit = 10000;
 const invoiceCandidates = runs.flatMap((run) => run.orders)
   .filter((order) => order.orderNumber != null)
   .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
