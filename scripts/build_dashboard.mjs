@@ -410,6 +410,8 @@ const archivedOrders = await mapLimited(invoiceCandidates, 64, async (order) => 
     _archiveParty: (await exists(partyFile)) ? await readJson(partyFile) : null,
   };
 });
+invoiceCandidates.length = 0;
+for (const run of runs) run.orders = [];
 const orderRows = archivedOrders
   .filter((order) => order.orderNumber != null)
   .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
