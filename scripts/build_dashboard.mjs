@@ -136,17 +136,20 @@ async function loadArchiveStatuses() {
     let orders = 0;
     if (await exists(orderRoot)) orders = (await fs.readdir(orderRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).length;
     const complete = Boolean(manifest.completedAt);
+    const completedLocalYmd = complete
+      ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(manifest.completedAt))
+      : "";
     const fullYear = year < currentYear && manifest.dateRange.start === `${year}-01-01` && manifest.dateRange.end === `${year}-12-31`;
-    const currentThroughToday = year === currentYear && complete && manifest.dateRange.start <= `${year}-01-01` && manifest.dateRange.end >= todayYmd;
+    const currentSweep = year === currentYear && complete && manifest.dateRange.start <= `${year}-01-01` && manifest.dateRange.end >= completedLocalYmd;
     statuses.push({
       year,
-      status: complete ? (fullYear ? "Complete year" : currentThroughToday ? "Current through today" : "Partial year complete") : "In progress / resumable",
+      status: complete ? (fullYear ? "Complete year" : currentSweep ? `Current through ${completedLocalYmd}` : "Partial year complete") : "In progress / resumable",
       start: manifest.dateRange.start,
-      end: currentThroughToday ? todayYmd : manifest.dateRange.end,
+      end: currentSweep ? completedLocalYmd : manifest.dateRange.end,
       orders,
       run: name,
       updated: manifest.completedAt ?? manifest.startedAt ?? "",
-      notes: complete ? (fullYear ? "Calendar-year manifest complete" : currentThroughToday ? `Completed sweep includes all records available through ${todayYmd}` : "Completed run; calendar-year range is partial") : "Sweep can be rerun; existing files will be skipped",
+      notes: complete ? (fullYear ? "Calendar-year manifest complete" : currentSweep ? `Completed sweep includes all records available through ${completedLocalYmd}` : "Completed run; calendar-year range is partial") : "Sweep can be rerun; existing files will be skipped",
     });
   }
   return statuses;
@@ -154,6 +157,7 @@ async function loadArchiveStatuses() {
 
 const runs = await loadRuns();
 const archiveStatuses = await loadArchiveStatuses();
+const archiveAsOf = archiveStatuses.find((status) => status.year === currentYear)?.end ?? todayYmd;
 const monthly = new Map();
 for (const run of runs) {
   for (const order of run.orders) {
@@ -234,7 +238,7 @@ dashboard.getRange("A1:K1").merge();
 dashboard.getRange("A1").values = [[`PCS ARCHIVE — v${archiveVersion}`]];
 dashboard.getRange("A1:K1").format = titleFormat;
 dashboard.getRange("A2:K3").merge();
-dashboard.getRange("A2").values = [[`ARCHIVE STATUS — refreshed ${generatedAt.toLocaleString("en-US", { timeZone: "America/Los_Angeles" })}. The completed 2026 sweep includes all records available through today, ${todayYmd}.`]];
+dashboard.getRange("A2").values = [[`ARCHIVE STATUS — refreshed ${generatedAt.toLocaleString("en-US", { timeZone: "America/Los_Angeles" })}. The completed 2026 sweep includes all records available through ${archiveAsOf}.`]];
 dashboard.getRange("A2:K3").format = { fill: "#FEF3C7", font: { color: "#92400E", bold: true }, wrapText: true, borders: { preset: "outside", style: "thin", color: "#F59E0B" } };
 
 dashboard.getRange("A5:B5").values = [["Archived orders", totalOrders]];
@@ -370,7 +374,7 @@ issuesSheet.freezePanes.freezeRows(1);
 sources.getRange("A1:D1").values = [["Topic", "Definition / rule", "Current source", "Limitation / next step"]];
 sources.getRange("A2:D13").values = [
   ["Read-only", "The exporter uses GET and approved report retrieval only.", "PCS API / authenticated report pages", "No PCS records are changed by collection."],
-  ["Coverage", "Past years are complete only when Jan 1–Dec 31 has a completed manifest and failures have been reviewed.", "Export manifests", `The 2026 sweep is current through ${todayYmd}; the calendar year remains in progress.`],
+  ["Coverage", "Past years are complete only when Jan 1–Dec 31 has a completed manifest and failures have been reviewed.", "Export manifests", `The 2026 sweep includes records through ${archiveAsOf}; the calendar year remains in progress.`],
   ["Customers", "Latest full customer snapshot; do not sum snapshots across runs.", "API customers endpoint", "Contains PII; dashboard intentionally shows counts only."],
   ["Products", "Latest full product snapshot; do not sum snapshots across runs.", "API products endpoint", "Product reporting model is not built yet."],
   ["Order value*", "Sum of orderTotal from archived order snapshots.", "API order detail", "Not equivalent to cash-accounting sales."],
@@ -390,7 +394,7 @@ sources.getRange("D:D").format.columnWidth = 44;
 sources.getRange("A1:D13").format.wrapText = true;
 sources.freezePanes.freezeRows(1);
 
-const invoiceIndexLimit = 10000;
+const invoiceIndexLimit = 2000;
 const invoiceCandidates = runs.flatMap((run) => run.orders)
   .filter((order) => order.orderNumber != null)
   .sort((a, b) => Number(a.orderNumber) - Number(b.orderNumber))
