@@ -1,0 +1,20 @@
+LAZERTAG EXTREME - ALPHA KIOSK PRODUCTION PACKAGE
+
+Files are supplied one-to-one at final size with 0.125 inch bleed on every edge.
+Artwork is flattened; no fonts are required. CTA text uses Eurostile Extended #2 Bold and the font is included for vendor reference.
+All TIFF raster assets are CMYK at 150 DPI and are embedded in the matching EPS/PDF files.
+The supplied vector AI logo was used as the artwork source and is included for vendor reference.
+
+Lazertag-Extreme-Alpha-Header-v9-AI-logo-eurostile
+  Trim: 15.25 x 4.375 inches
+  Supplied page/art size with bleed: 15.5 x 4.625 inches
+  Raster: 2325 x 694 pixels, CMYK, 150 DPI
+  PDF: 15.5 x 4.625 inches, embedded DeviceCMYK image
+  EPS: one-to-one bounding box, embedded CMYK image
+
+Lazertag-Extreme-Alpha-Door-v9-AI-logo-eurostile
+  Trim: 14 x 6 inches
+  Supplied page/art size with bleed: 14.25 x 6.25 inches
+  Raster: 2138 x 938 pixels, CMYK, 150 DPI
+  PDF: 14.25 x 6.25 inches, embedded DeviceCMYK image
+  EPS: one-to-one bounding box, embedded CMYK image
