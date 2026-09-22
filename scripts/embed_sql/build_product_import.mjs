@@ -42,6 +42,7 @@ const productByBarcode = new Map();
 for (const row of barcodeRows) {
   const barcode = row.Barcode;
   if (!barcode || row.Product_Id === "0") continue;
+  if (barcode.includes("|")) throw new Error(`Barcode already contains pipe separator: ${barcode}`);
   if (!barcodesByProduct.has(row.Product_Id)) barcodesByProduct.set(row.Product_Id, new Set());
   barcodesByProduct.get(row.Product_Id).add(barcode);
   productByBarcode.set(barcode, row.Product_Id);
@@ -101,7 +102,6 @@ for (const product of activeProducts) {
   if (stock) productsWithStockMatch++;
   if (barcodes.length > 1) productsWithMultipleBarcodes++;
   if (barcodes.length === 0) productsWithoutBarcode++;
-  for (const [barcodeIndex, barcode] of (barcodes.length ? barcodes : [null]).entries()) {
     const cells = Array(36).fill(null);
     cells[0] = product.Product_Id;
     cells[1] = product.Product_Name || null;
@@ -115,13 +115,10 @@ for (const product of activeProducts) {
     if (stock) {
       cells[5] = stock.average_unit_cost === "" ? null : Number(stock.average_unit_cost);
       cells[34] = stock.last_purchase_price === "" ? null : Number(stock.last_purchase_price);
-      if (barcodeIndex === 0) {
-        cells[33] = stock.Quantity_On_Hand === "" ? 1 : Number(stock.Quantity_On_Hand);
-      }
+      cells[33] = stock.Quantity_On_Hand === "" ? 1 : Number(stock.Quantity_On_Hand);
     }
-    cells[10] = barcode;
+    cells[10] = barcodes.length ? barcodes.join("|") : null;
     outputRows.push(cells);
-  }
 }
 
 const workbook = await SpreadsheetFile.importXlsx(await FileBlob.load(templatePath));
@@ -137,6 +134,9 @@ if (!Number.isInteger(currentLastRow)) throw new Error("Could not determine curr
 if (lastRow > currentLastRow) {
   sheet.getRange(`A${currentLastRow + 1}:AJ${lastRow}`)
     .copyFrom(sheet.getRange(`A${currentLastRow}:AJ${currentLastRow}`), "all");
+}
+if (lastRow < currentLastRow) {
+  sheet.getRange(`A${lastRow + 1}:AJ${currentLastRow}`).clear({ applyTo: "all" });
 }
 sheet.getRange(`A2:A${lastRow}`).setNumberFormat("@");
 sheet.getRange(`K2:K${lastRow}`).setNumberFormat("@");
@@ -165,7 +165,7 @@ console.log(JSON.stringify({
   outputRows: outputRows.length,
   productsWithMultipleBarcodes,
   productsWithoutBarcode,
-  extraBarcodeRows: outputRows.length - activeProducts.length,
+  pipeSeparatedBarcodeProducts: productsWithMultipleBarcodes,
   productsWithReportMatch,
   productsWithAmbiguousReport,
   unmatchedReportRows,
